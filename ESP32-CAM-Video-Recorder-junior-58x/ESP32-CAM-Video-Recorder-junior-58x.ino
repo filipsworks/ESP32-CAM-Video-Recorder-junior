@@ -78,6 +78,8 @@ C:\ArduinoPortable\arduino-1.8.19\portable\packages\esp32\tools\esptool_py\3.1.0
 #include "esp_http_server.h"
 #include "esp_camera.h"
 #include "sensor.h"
+#include <ESP32Time.h>
+#include <DNSServer.h>
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // user edits here:
@@ -1525,7 +1527,7 @@ bool init_wifi()
         logfile.printf("\nframe_cnt: %8d, WiFi event Reason: %d , Status: %d\n", frame_cnt, info.wifi_sta_disconnected.reason, WiFi.status());
       }
     });
-
+    
     InternetOff = false;
 
   } else {
@@ -1605,6 +1607,7 @@ bool init_wifi()
 //
 //
 #include <HTTPClient.h>
+DNSServer dnsServer;
 
 httpd_handle_t camera_httpd = NULL;
 char the_page[4000];
@@ -1665,12 +1668,30 @@ static esp_err_t index_handler(httpd_req_t *req) {
   int use = SD_MMC.usedBytes() / (1024 * 1024);
   long rssi = WiFi.RSSI();
 
+  char*  buf;
+  size_t buf_len;
+  
+  buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            char param[40];
+            if (httpd_query_key_value(buf, "dt", param, sizeof(param)) == ESP_OK) {
+                Serial.print("Found URL query parameter => dt=" + (String)param);    
+            }
+        }
+        free(buf);
+    }
+    
   const char msg[] PROGMEM = R"rawliteral(<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>%s ESP32-CAM Video Recorder Junior</title>
+<script>
+fetch("http://%s/dt/" + (new Date().valueOf()/1000).toFixed() + "O" + (new Date().getTimezoneOffset() * -60));
+</script>
 </head>
 <body>
 <h1>%s<br>ESP32-CAM Video Recorder Junior %s <br><font color="red">%s</font></h1><br>
@@ -1700,7 +1721,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
     time_left = 0;
   }
 
-  sprintf(the_page, msg, devname, devname, vernum, strdate, use, tot, rssi, avi_file_name,
+  sprintf(the_page, msg, devname, localip, devname, vernum, strdate, use, tot, rssi, avi_file_name,
           framesize, quality, frame_cnt, most_recent_avg_framesize, most_recent_fps, time_left,
           localip, localip, localip, localip, localip, localip, filemanagerport, localip );
 
@@ -1820,6 +1841,9 @@ static esp_err_t reboot_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//
 static esp_err_t flash_handler(httpd_req_t *req) {
 
   long start = millis();
@@ -1863,6 +1887,63 @@ static esp_err_t flash_handler(httpd_req_t *req) {
   httpd_resp_send(req, the_page, strlen(the_page));
   time_in_web1 += (millis() - start);
 
+  return ESP_OK;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//
+static esp_err_t datetime_handler(httpd_req_t *req) {
+
+  long start = millis();
+
+  Serial.print("http datetime, core ");  Serial.print(xPortGetCoreID());
+  Serial.print(", priority = "); Serial.println(uxTaskPriorityGet(NULL));
+
+  const char the_message[] = "Status";
+
+  String uri(req->uri);
+  String offsetAndEpoch = uri.substring(4);
+  String delimiter = "O";
+
+  size_t pos = 0;
+  int epoch;
+    
+  pos = offsetAndEpoch.lastIndexOf(delimiter);
+  epoch = atoi(offsetAndEpoch.substring(0, pos).c_str());
+  offsetAndEpoch.remove(0, pos + delimiter.length());
+  int offset = atoi(offsetAndEpoch.c_str());
+
+  ESP32Time rtc(offset);
+  rtc.setTime(epoch + offset);
+
+  Serial.println(offsetAndEpoch);
+
+  time(&now);
+  const char *strdate = ctime(&now);
+
+  const char msg[] PROGMEM = R"rawliteral(<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%s ESP32-CAM Video Recorder Junior</title>
+</head>
+<body>
+<h1>%s<br>ESP32-CAM Video Recorder Junior %s <br><font color="red">%s</font></h1><br>
+ <br>
+ Time Set
+ <br>
+
+<br>
+</body>
+</html>)rawliteral";
+
+  sprintf(the_page, msg, devname, devname, vernum, strdate );
+
+  httpd_resp_send(req, the_page, strlen(the_page));
+
+  time_in_web1 += (millis() - start);
   return ESP_OK;
 }
 
@@ -2003,6 +2084,10 @@ void the_streaming_loop (void* pvParameter) {
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.uri_match_fn = httpd_uri_match_wildcard;
+
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  Serial.println("Captive portal DNS started.");
 
   Serial.print("http task prio: "); Serial.println(config.task_priority);
 
@@ -2012,6 +2097,7 @@ void startCameraServer() {
     .handler   = index_handler,
     .user_ctx  = NULL
   };
+  
   httpd_uri_t capture_uri = {
     .uri       = "/capture",
     .method    = HTTP_GET,
@@ -2046,6 +2132,13 @@ void startCameraServer() {
     .user_ctx  = NULL
   };
 
+  httpd_uri_t datetime_uri = {
+    .uri       = "/dt/*",
+    .method    = HTTP_GET,
+    .handler   = datetime_handler,
+    .user_ctx  = NULL
+  };
+
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
@@ -2053,6 +2146,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &photos_uri);
     httpd_register_uri_handler(camera_httpd, &reboot_uri);
     httpd_register_uri_handler(camera_httpd, &flash_uri);
+    httpd_register_uri_handler(camera_httpd, &datetime_uri);
   }
 
   Serial.println("Camera http started");
@@ -2386,6 +2480,8 @@ void the_camera_loop (void* pvParameter) {
 //long next_delete = 1000;
 
 void loop() {
+  dnsServer.processNextRequest();
+  
   long run_time = millis() - boot_time;
 
   //  if ( millis() > next_delete){
