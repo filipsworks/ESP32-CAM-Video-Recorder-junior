@@ -1667,21 +1667,6 @@ static esp_err_t index_handler(httpd_req_t *req) {
   int tot = SD_MMC.totalBytes() / (1024 * 1024);
   int use = SD_MMC.usedBytes() / (1024 * 1024);
   long rssi = WiFi.RSSI();
-
-  char*  buf;
-  size_t buf_len;
-  
-  buf_len = httpd_req_get_url_query_len(req) + 1;
-    if (buf_len > 1) {
-        buf = (char*)malloc(buf_len);
-        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
-            char param[40];
-            if (httpd_query_key_value(buf, "dt", param, sizeof(param)) == ESP_OK) {
-                Serial.print("Found URL query parameter => dt=" + (String)param);    
-            }
-        }
-        free(buf);
-    }
     
   const char msg[] PROGMEM = R"rawliteral(<!doctype html>
 <html>
